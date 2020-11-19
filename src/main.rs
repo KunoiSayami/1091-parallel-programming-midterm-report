@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 
 
 #[derive(Debug)]
-struct CountableMutFile {
+struct CountableFile {
     count: usize,
     file: File,
 }
@@ -45,10 +45,11 @@ fn main() {
     }
 }
 
-fn wrapper(lock: Arc<Mutex<CountableMutFile>>, thread_id: usize, buffer: Option<&mut [u8]>, write_buffer: Option<&[u8]>) -> usize {
+fn wrapper(lock: Arc<Mutex<CountableFile>>, thread_id: usize, buffer: Option<&mut [u8]>, write_buffer: Option<&[u8]>) -> usize {
     loop {
         {
             let mut num = lock.lock().unwrap();
+            println!("num {}", num.count);
             if num.count % (thread_id + 1) != 0 {
                 let size = match buffer {
                     Some(buf) => num.file.read(buf).expect("fail"),
@@ -81,7 +82,6 @@ fn sub_task(path_to_ref: &str, thread_nums: usize) {
 
     let output_file:  File = match OpenOptions::new()
         .write(true)
-        .create_new(true)
         .open(path_to_out.clone()) {
         Ok(f) => f,
         Err(error) => {
@@ -89,9 +89,10 @@ fn sub_task(path_to_ref: &str, thread_nums: usize) {
         }
     };
     let read_lock = Arc::new(Mutex::new(
-        CountableMutFile{count:1, file: input_file }));
+        CountableFile {count:1, file: input_file }));
     let write_lock = Arc::new(Mutex::new(
-        CountableMutFile{count:1, file: output_file }));
+        CountableFile {count:1, file: output_file }));
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     for thread_id in 0..thread_nums {
         let read_lock = Arc::clone(&read_lock);
         let write_lock = Arc::clone(&write_lock);
@@ -101,7 +102,6 @@ fn sub_task(path_to_ref: &str, thread_nums: usize) {
             let mut read_size: usize;
             //let mut gz_buffer = [0; 1024];
             loop {
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
                 read_size = wrapper(read_lock.clone(), thread_id, Some(&mut buffer), None);
                 println!("thread: {} read_size: {}", thread_id, read_size);
                 encoder.write_all(&buffer[..read_size]).unwrap();
