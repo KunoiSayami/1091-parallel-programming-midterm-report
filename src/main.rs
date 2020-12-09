@@ -24,19 +24,22 @@ use std::thread::sleep;
 use std::time::Duration;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use std::io::{Read, Write};
+use std::io::{Read, Write, ErrorKind};
 
+const BUFFER_SIZE: usize = 1024 * 256;
 
 #[derive(Debug)]
 struct CountableFile {
     count: usize,
     file: File,
+    finish: bool
 }
 
 #[derive(Debug)]
 struct CountableGzip {
     count: usize,
-    encoder: GzEncoder<Vec<u8>>
+    encoder: GzEncoder<Vec<u8>>,
+    finish: bool
 }
 
 // This is the main thread
@@ -50,31 +53,42 @@ fn main() {
     }
 }
 
-fn wrapper(lock: Arc<Mutex<CountableFile>>, thread_id: usize, buffer: &mut [u8]) -> usize {
+fn wrapper(lock: &Arc<Mutex<CountableFile>>, thread_id: usize, buffer: &mut [u8]) -> usize {
     loop {
         {
             let mut num = lock.lock().unwrap();
-            println!("num {}", num.count);
-            if num.count % (thread_id + 1) != 0 {
+            //println!("num {}", num.count);
+            if num.finish {
+                return 0;
+            }
+            if num.count % (thread_id + 1) == 0 {
                 let size = num.file.read(buffer).expect("fail");
                 num.count += 1;
+                if size < BUFFER_SIZE {
+                    num.finish = true;
+                }
                 return size;
             }
+            //println!("{}", num.count)
         }
         sleep(Duration::from_millis(5));
     }
 }
 
-fn gzip_wrapper(lock: Arc<Mutex<CountableGzip>>, thread_id: usize, buffer: &[u8]) {
+fn gzip_wrapper(lock: &Arc<Mutex<CountableGzip>>, thread_id: usize, buffer: &[u8]) {
     loop {
         {
             let mut num = lock.lock().unwrap();
-            println!("num {}", num.count);
-            if num.count % (thread_id + 1) != 0 {
+            //println!("num {}", num.count);
+            if num.finish {
+                break
+            }
+            if num.count % (thread_id + 1) == 0 {
                 num.encoder.write_all(buffer).unwrap();
                 num.count += 1;
                 break;
             }
+            //println!("{}", num.count)
         }
         sleep(Duration::from_millis(5));
     }
@@ -84,6 +98,7 @@ fn sub_task(path_to_ref: &str, thread_nums: usize) {
     println!("Use: {} thread(s)", thread_nums);
     let path_to = String::from(path_to_ref);
     let path_to_out = format!("{}.gz", path_to_ref);
+    std::fs::remove_file(&path_to_out);
     // Make a vector to hold the children which are spawned.
     let mut children = vec![];
     let input_file:  File = match File::open(path_to.clone()) {
@@ -95,6 +110,7 @@ fn sub_task(path_to_ref: &str, thread_nums: usize) {
 
     let mut output_file:  File = match OpenOptions::new()
         .write(true)
+        .create_new(true)
         .open(path_to_out.clone()) {
         Ok(f) => f,
         Err(error) => {
@@ -102,23 +118,27 @@ fn sub_task(path_to_ref: &str, thread_nums: usize) {
         }
     };
     let read_lock = Arc::new(Mutex::new(
-        CountableFile {count:1, file: input_file }));
+        CountableFile {count:1, file: input_file, finish: false}));
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let write_lock = Arc::new(Mutex::new(
-        CountableGzip {count:1, encoder}));
+        CountableGzip {count:1, encoder, finish: false}));
     for thread_id in 0..thread_nums {
         let read_lock = Arc::clone(&read_lock);
         let write_lock = Arc::clone(&write_lock);
         // Spin up another thread
         children.push(thread::spawn(move || {
-            let mut buffer = [0; 1024];
+            let mut buffer = [0; BUFFER_SIZE];
             let mut read_size: usize;
-            //let mut gz_buffer = [0; 1024];
+            let thread_read_lock = read_lock.clone();
+            let thread_write_lock = write_lock.clone();
             loop {
-                read_size = wrapper(read_lock.clone(), thread_id, &mut buffer);
-                gzip_wrapper(write_lock.clone(),  thread_id, &buffer);
-                if read_size < 1024 {
-                    break;
+                read_size = wrapper(&thread_read_lock, thread_id, &mut buffer);
+                gzip_wrapper(&thread_write_lock, thread_id, &buffer[..read_size]);
+                if read_size < BUFFER_SIZE {
+                    let mut num = thread_write_lock.lock().unwrap();
+                    num.finish = true;
+                    //println!("{} exit thread", thread_id);
+                    return ;
                 }
             }
         }));
